@@ -1,11 +1,9 @@
 import os
-import time
 import json
+import time
 import threading
-from collections import defaultdict
-from binance.client import Client
-import websocket
 import requests
+import websocket
 
 # =================================================
 # CONFIG
@@ -16,25 +14,21 @@ FEE = 0.001
 SLIPPAGE = 0.002
 MIN_EDGE = 0.0015
 
-TRADE_USDT = 50
-MAX_TRADES_PER_DAY = 20
-COOLDOWN = 120          # seconds per triangle
+START_BALANCE = 1000.0
+TRADE_SIZE = 50
+MAX_TRADES = 50
+COOLDOWN = 60
 MIN_LIQ_USDT = 500
 
 # =================================================
 
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-
-client = Client(API_KEY, API_SECRET, testnet=True)
-
 prices = {}
 last_trade = {}
-trade_lock = threading.Lock()
-daily_trades = 0
-daily_pnl = 0.0
+balance = START_BALANCE
+trade_count = 0
+total_pnl = 0.0
 
-INFO_URL = "https://testnet.binance.vision/api/v3/exchangeInfo"
+INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
 
 # ---------- SYMBOL DISCOVERY ----------
 def get_symbols():
@@ -62,67 +56,26 @@ for s in SYMBOLS:
 print(f"✔ Triangles: {len(TRIANGLES)}")
 print(f"✔ Streams: {len(STREAMS)}")
 
-# ---------- ORDER HELPERS ----------
-def place_limit(symbol, side, qty, price):
-    return client.create_order(
-        symbol=symbol,
-        side=side,
-        type="LIMIT",
-        timeInForce="IOC",
-        quantity=round(qty, 6),
-        price=f"{price:.6f}"
-    )
+# ---------- PAPER TRADE ----------
+def paper_trade(pair, direction, edge):
+    global balance, trade_count, total_pnl
 
-def cancel_all(symbol):
-    try:
-        client.cancel_open_orders(symbol=symbol)
-    except:
-        pass
+    if trade_count >= MAX_TRADES or balance < TRADE_SIZE:
+        return
 
-# ---------- ARBITRAGE EXECUTION ----------
-def execute_triangle(alt, base, direction, edge):
-    global daily_trades, daily_pnl
+    profit = TRADE_SIZE * edge
+    balance += profit
+    total_pnl += profit
+    trade_count += 1
 
-    with trade_lock:
-        if daily_trades >= MAX_TRADES_PER_DAY:
-            return
-
-        print("\n🚀 EXECUTING TRIANGLE", alt, base, direction)
-
-        try:
-            if direction == 1:
-                # USDT → ALT → BASE → USDT
-                a_bid, a_ask, *_ = prices[alt + "USDT"]
-                b_bid, b_ask, *_ = prices[alt + base]
-                c_bid, c_ask, *_ = prices[base + "USDT"]
-
-                qty_alt = TRADE_USDT / a_ask
-                place_limit(alt + "USDT", "BUY", qty_alt, a_ask)
-                place_limit(alt + base, "SELL", qty_alt, b_bid)
-                place_limit(base + "USDT", "SELL", qty_alt * b_bid, c_bid)
-
-            else:
-                # USDT → BASE → ALT → USDT
-                a_bid, a_ask, *_ = prices[alt + "USDT"]
-                b_bid, b_ask, *_ = prices[alt + base]
-                c_bid, c_ask, *_ = prices[base + "USDT"]
-
-                qty_base = TRADE_USDT / c_ask
-                place_limit(base + "USDT", "BUY", qty_base, c_ask)
-                place_limit(alt + base, "BUY", qty_base / b_ask, b_ask)
-                place_limit(alt + "USDT", "SELL", qty_base / b_ask, a_bid)
-
-            daily_trades += 1
-            pnl = TRADE_USDT * edge
-            daily_pnl += pnl
-
-            print(f"✅ DONE | EDGE {edge*100:.3f}% | PnL ≈ {pnl:.2f} USDT")
-
-        except Exception as e:
-            cancel_all(alt + "USDT")
-            cancel_all(alt + base)
-            cancel_all(base + "USDT")
-            print("❌ FAILED – ORDERS CANCELLED", e)
+    print("\n" + "=" * 60)
+    print("📄 PAPER TRADE EXECUTED")
+    print(f"PAIR      : {pair}")
+    print(f"DIRECTION : {direction}")
+    print(f"EDGE      : {edge*100:.3f}%")
+    print(f"PROFIT    : {profit:.2f} USDT")
+    print(f"BALANCE   : {balance:.2f} USDT")
+    print(f"TRADES    : {trade_count}")
 
 # ---------- ARBITRAGE CHECK ----------
 def check_arbitrage():
@@ -140,17 +93,23 @@ def check_arbitrage():
         except KeyError:
             continue
 
-        a_bid, a_ask, a_bq, *_ = a
-        b_bid, b_ask, b_bq, *_ = b
-        c_bid, c_ask, c_bq, *_ = c
+        a_bid, a_ask, a_bq, a_aq = a
+        b_bid, b_ask, b_bq, b_aq = b
+        c_bid, c_ask, c_bq, c_aq = c
 
-        if min(a_bid * a_bq, b_bid * b_bq, c_bid * c_bq) < MIN_LIQ_USDT:
+        if min(
+            a_bid * a_bq,
+            b_bid * b_bq,
+            c_bid * c_bq
+        ) < MIN_LIQ_USDT:
             continue
 
+        # PATH 1
         amt = 1 / a_ask * (1 - FEE)
         amt = amt * b_bid * (1 - FEE)
         final1 = amt * c_bid * (1 - FEE)
 
+        # PATH 2
         amt = 1 / c_ask * (1 - FEE)
         amt = amt / b_ask * (1 - FEE)
         final2 = amt * a_bid * (1 - FEE)
@@ -160,32 +119,42 @@ def check_arbitrage():
 
         if edge > MIN_EDGE:
             last_trade[key] = now
-            direction = 1 if final1 > final2 else 2
-            execute_triangle(alt, base, direction, edge)
+            direction = (
+                "USDT → ALT → BASE → USDT"
+                if final1 > final2
+                else "USDT → BASE → ALT → USDT"
+            )
+            paper_trade(f"{alt}/{base}", direction, edge)
 
 # ---------- WEBSOCKET ----------
 def on_message(ws, msg):
     d = json.loads(msg).get("data")
     if not d:
         return
+
     prices[d["s"]] = (
         float(d["b"]),
         float(d["a"]),
         float(d["B"]),
         float(d["A"])
     )
+
     check_arbitrage()
 
 def on_open(ws):
-    print("🟢 WebSocket connected")
+    print("🟢 Binance WebSocket connected")
+
+def on_error(ws, err):
+    print("⚠ WebSocket error:", err)
 
 def start_ws():
     ws = websocket.WebSocketApp(
-        "wss://testnet.binance.vision/stream?streams=" + "/".join(STREAMS),
+        "wss://stream.binance.com:9443/stream?streams=" + "/".join(STREAMS),
         on_message=on_message,
-        on_open=on_open
+        on_open=on_open,
+        on_error=on_error
     )
     ws.run_forever(ping_interval=30, ping_timeout=10)
 
-print("🤖 Binance Testnet Arbitrage Bot LIVE")
+print("🤖 Arbitrage Bot LIVE (Paper Mode – Cloud Safe)")
 start_ws()
