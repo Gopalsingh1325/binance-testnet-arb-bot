@@ -23,8 +23,8 @@ MIN_LIQ_USDT = 500
 
 # =================================================
 
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
+API_KEY = os.getenv(pemYv10JfJi5bC1ZPcSC1Xkjip5inxnvtTSuaLMvuBWeeNRfU7sQoQmbGOB5y0vl)
+API_SECRET = os.getenv(hmPRqeLvdB67MJQTNM3SLiW3l5ZfRRzzEwPXd9GOuoT44LfXkZXv4ZDhj9uhdcF5)
 
 client = Client(API_KEY, API_SECRET, testnet=True)
 
